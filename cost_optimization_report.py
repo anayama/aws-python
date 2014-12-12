@@ -2,7 +2,7 @@
 # -*- coding:utf-8 -*-
 
 import sys
-import boto.ec2.cloudwatch, boto.ec2.elb, boto.rds
+import boto.ec2.cloudwatch, boto.ec2.elb, boto.rds, boto.ses
 import urllib2, json
 import datetime
 import traceback
@@ -20,6 +20,9 @@ EC2PERIOD = int(config.get('optimization','ec2_low_period'))
 EBSIOPS = int(config.get('optimization','ebs_max_iops'))
 ELBREQ = int(config.get('optimization','elb_few_request'))
 RDSPERIOD = int(config.get('optimization','rds_idle_period'))
+REGION = config.get('optimization','region')
+FROM_MAIL = config.get('optimization','from_address')
+TO_MAIL = config.get('optimization','to_address')
 
 MAIL_MESSAGE = """
 【コスト最適化】
@@ -111,7 +114,7 @@ def low_utilization_ec2(region):
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch. - low_utilization_ec2()',
+        log_error('Error of the Cost Optimization. - low_utilization_ec2()',
                   traceback.format_exc())
 
 #############################################################
@@ -159,7 +162,7 @@ def underused_ebs(region):
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch. - underused_ebs()',
+        log_error('Error of the Cost Optimization. - underused_ebs()',
                   traceback.format_exc())
 
 #############################################################
@@ -180,7 +183,7 @@ def underused_eip(region):
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch. - underused_eip()',
+        log_error('Error of the Cost Optimization. - underused_eip()',
                   traceback.format_exc())
 
 #############################################################
@@ -233,7 +236,7 @@ def idle_elb(region):
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch. - idle_elb()',
+        log_error('Error of the Cost Optimization. - idle_elb()',
                   traceback.format_exc())
 
 #############################################################
@@ -280,7 +283,36 @@ def idle_rds(region):
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch. - idle_rds()',
+        log_error('Error of the Cost Optimization. - idle_rds()',
+                  traceback.format_exc())
+
+#############################################################
+# メール送信
+#############################################################
+def send_message(message):
+    try:
+        # リージョン取得
+        ses_region = 'us-east-1'
+        for region in boto.ses.regions():
+            if REGION in region.name:
+                ses_region = REGION
+
+        # SES
+        ses_conn = boto.ses.connect_to_region(ses_region)
+        addresses = ses_conn.list_verified_email_addresses()
+        address = addresses["ListVerifiedEmailAddressesResponse"]\
+                                ["ListVerifiedEmailAddressesResult"]\
+                                ["VerifiedEmailAddresses"]
+
+        if TO_MAIL in address and FROM_MAIL in address:
+            ses_conn.send_email(FROM_MAIL,
+                                '【AWS】コスト最適化のアラート通知',
+                                message,
+                                TO_MAIL)
+
+    except:
+        # エラー出力
+        log_error('Error of the Cost Optimization. - idle_rds()',
                   traceback.format_exc())
 
 #############################################################
@@ -327,11 +359,11 @@ if __name__ == '__main__':
                      .replace('<EIP-Unassociated>', mes_eip)\
                      .replace('<ELB-Idle>', mes_elb)\
                      .replace('<RDS-Idle>', mes_rds)
-        print message
+        send_message(message)
 
     except:
         # 異常終了
         log_info('CloudWatch abnormal termination')
         # エラー出力
-        log_error('Error of the CloudWatch.',traceback.format_exc())
+        log_error('Error of the Cost Optimization.',traceback.format_exc())
 
