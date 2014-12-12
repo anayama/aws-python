@@ -20,22 +20,23 @@ EC2PERIOD = int(config.get('optimization','ec2_low_period'))
 EBSIOPS = int(config.get('optimization','ebs_max_iops'))
 ELBREQ = int(config.get('optimization','elb_few_request'))
 RDSPERIOD = int(config.get('optimization','rds_idle_period'))
-REGION = config.get('optimization','region')
-FROM_MAIL = config.get('optimization','from_address')
-TO_MAIL = config.get('optimization','to_address')
 
-MAIL_MESSAGE = """
+MESSAGE_REGION = config.get('optimization','region')
+MESSAGE_FROM = config.get('optimization','from_address')
+MESSAGE_TO = config.get('optimization','to_address')
+MESSAGE_SUBJECT = "【AWS】コスト最適化のレポート通知"
+MESSAGE_BODY = """
 【コスト最適化】
  不要リソースやアイドル状態など、コストを節約できるリソースは下記のとおりです。
 
 1. 使用率の低いAmazon EC2 Instances
 <EC2-LowUtilization>
-2. アイドル状態の Load Balancer
-<ELB-Idle>
-3. 利用頻度の低いAmazon EBSボリューム
+2. 利用頻度の低いAmazon EBSボリューム
 <EBS-Underutilized>
-4. 関連付けられていない Elastic IP Address
+3. 関連付けられていない Elastic IP Address
 <EIP-Unassociated>
+4. アイドル状態の Load Balancer
+<ELB-Idle>
 5. Amazon RDSアイドル状態のDBインスタンス
 <RDS-Idle>
 """
@@ -294,8 +295,8 @@ def send_message(message):
         # リージョン取得
         ses_region = 'us-east-1'
         for region in boto.ses.regions():
-            if REGION in region.name:
-                ses_region = REGION
+            if MESSAGE_REGION in region.name:
+                ses_region = MESSAGE_REGION
 
         # SES
         ses_conn = boto.ses.connect_to_region(ses_region)
@@ -304,11 +305,11 @@ def send_message(message):
                                 ["ListVerifiedEmailAddressesResult"]\
                                 ["VerifiedEmailAddresses"]
 
-        if TO_MAIL in address and FROM_MAIL in address:
-            ses_conn.send_email(FROM_MAIL,
-                                '【AWS】コスト最適化のアラート通知',
+        if MESSAGE_TO in address and MESSAGE_FROM in address:
+            ses_conn.send_email(MESSAGE_FROM,
+                                MESSAGE_SUBJECT,
                                 message,
-                                TO_MAIL)
+                                MESSAGE_TO)
 
     except:
         # エラー出力
@@ -353,7 +354,7 @@ if __name__ == '__main__':
         for rdsinstance in idle_rds(region):
             mes_rds = mes_rds + "  " + rdsinstance + "\n"
 
-        message = MAIL_MESSAGE.decode('utf-8')\
+        message = MESSAGE_BODY.decode('utf-8')\
                      .replace('<EC2-LowUtilization>', mes_ec2)\
                      .replace('<EBS-Underutilized>', mes_ebs)\
                      .replace('<EIP-Unassociated>', mes_eip)\
