@@ -9,25 +9,36 @@ import traceback
 
 from common import *
 
-# CPU使用率 10%
-cpu_utilization = 10
-# ネットワークIO 5MB
-network_io = 5242880
-# 利用頻度の低い期間 4日間
-low_period = 4
-# アイドル状態の期間 7日間
-idle_period = 7
+# 定義ファイルの取込み
+path = os.environ["PYTHONPATH"]
+USER = os.path.join(path,'user.conf')
+
+config = ConfigParser.RawConfigParser()
+config.read(USER)
+EC2CPU = int(config.get('optimization','ec2_cpu_utilization'))
+EC2PERIOD = int(config.get('optimization','ec2_low_period'))
+EBSIOPS = int(config.get('optimization','ebs_max_iops'))
+ELBREQ = int(config.get('optimization','elb_few_request'))
+RDSPERIOD = int(config.get('optimization','rds_idle_period'))
 
 MAIL_MESSAGE = """
 【コスト最適化】
-不要リソースやアイドル状態のリソースの除外や予約容量の契約など、いかにコストを節約するかが表示されます。
+ 不要リソースやアイドル状態など、コストを節約できるリソースは下記のとおりです。
 
-・使用率の低いAmazon EC2 Instances
-・アイドル状態の Load Balancer
-・利用頻度の低いAmazon EBSボリューム
-・関連付けられていない Elastic IP Address
-・Amazon RDSアイドル状態のDBインスタンス
+1. 使用率の低いAmazon EC2 Instances
+<EC2-LowUtilization>
+2. アイドル状態の Load Balancer
+<ELB-Idle>
+3. 利用頻度の低いAmazon EBSボリューム
+<EBS-Underutilized>
+4. 関連付けられていない Elastic IP Address
+<EIP-Unassociated>
+5. Amazon RDSアイドル状態のDBインスタンス
+<RDS-Idle>
 """
+
+# EC2とNameタグの対比表
+ec2_tags = {}
 
 #############################################################
 #   事前チェック
@@ -64,8 +75,13 @@ def low_utilization_ec2(region):
         for reservation in reservations:
             for instance in reservation.instances:
                 cpu_low_count = 0
-                nwin_low_count = 0
-                nwout_low_count = 0
+                # マッピング表
+                if 'Name' in instance.tags:
+                    nametag = instance.tags['Name']
+                else :
+                    nametag = 'None'
+
+                ec2_tags[instance.id] = nametag
 
                 # CPU Utilization (Percent)
                 cpu_metrics = cw_conn.get_metric_statistics(
@@ -80,62 +96,22 @@ def low_utilization_ec2(region):
                 for metric in cpu_metrics:
                     for key,val in metric.iteritems():
                         # CPU使用率が10%以下
-                        if key == 'Average' and int(val) <= cpu_utilization:
+                        if key == 'Average' and int(val) <= EC2CPU:
                             cpu_low_count = cpu_low_count + 1
-                    if cpu_low_count >= low_period:
+                    if cpu_low_count >= EC2PERIOD:
                         break
 
-                # Network In (Bytes)
-                nwin_metrics = cw_conn.get_metric_statistics(
-                                    86400,
-                                    start_time,
-                                    end_time,
-                                    'NetworkIn',
-                                    'AWS/EC2',
-                                    'Average',
-                                    dimensions={'InstanceId':instance.id})
-
-                for metric in nwin_metrics:
-                    for key,val in metric.iteritems():
-                        # Network in が5MB以下
-                        if key == 'Average' and int(val) <= network_io:
-                            nwin_low_count = nwin_low_count + 1
-                    if nwin_low_count >= low_period:
-                        break
-
-                # Network Out (Bytes)
-                nwout_metrics = cw_conn.get_metric_statistics(
-                                    86400,
-                                    start_time,
-                                    end_time,
-                                    'NetworkOut',
-                                    'AWS/EC2',
-                                    'Average',
-                                    dimensions={'InstanceId':instance.id})
-
-                for metric in nwout_metrics:
-                    for key,val in metric.iteritems():
-                        # Network in が5MB以下
-                        if key == 'Average' and int(val) <= network_io:
-                            nwout_low_count = nwout_low_count + 1
-                    if nwout_low_count >= low_period:
-                        break
-
-                if cpu_low_count >= low_period and \
-                   ( nwin_low_count >= low_period or \
-                     nwout_low_count >= low_period):
-                    if 'Name' in instance.tags:
-                        nametag = instance.tags['Name']
-                    else :
-                        nametag = 'None'
-                    instance_name = instance.id + " (" + nametag + ")"
+                if cpu_low_count >= EC2PERIOD:
+                    instance_name = instance.id + " / " \
+                                  + ec2_tags[instance.id] + " (" \
+                                  + instance.instance_type + ")"
                     ec2_list.append(instance_name)
 
         return ec2_list
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch.',
+        log_error('Error of the CloudWatch. - low_utilization_ec2()',
                   traceback.format_exc())
 
 #############################################################
@@ -150,14 +126,14 @@ def underused_ebs(region):
 
         # CloudWatch
         cw_conn = boto.ec2.cloudwatch.connect_to_region(region)
-
-        # EBS
+        # EC2/EBS
         ec2_conn = boto.ec2.connect_to_region(region)
+
         volumes = ec2_conn.get_all_volumes()
         for volume in volumes:
+            volume_low_count = 0
             if volume.status == 'available':
-                ebs_list.append(volume.id)
-                print volume.id
+                volume_low_count = 1
             else:
                 # VolumeReadOps (Count)
                 write_metrics = cw_conn.get_metric_statistics(
@@ -171,15 +147,19 @@ def underused_ebs(region):
 
                 for metric in write_metrics:
                     for key,val in metric.iteritems():
-                        if key == 'Maximum' and int(val) == 0:
-                            print volume.id
-                            ebs_list.append(volume.id)
+                        if key == 'Maximum' and int(val) <= EBSIOPS:
+                            volume_low_count = volume_low_count + 1
+            if volume_low_count >= 1:
+                volume_name = volume.id + " / " \
+                        + ec2_tags[volume.attach_data.instance_id] + " (" \
+                        + volume.type + " - " + str(volume.size) + "GB)"
+                ebs_list.append(volume_name)
 
         return ebs_list
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch.',
+        log_error('Error of the CloudWatch. - underused_ebs()',
                   traceback.format_exc())
 
 #############################################################
@@ -200,7 +180,7 @@ def underused_eip(region):
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch.',
+        log_error('Error of the CloudWatch. - underused_eip()',
                   traceback.format_exc())
 
 #############################################################
@@ -215,15 +195,45 @@ def idle_elb(region):
 
         # CloudWatch
         cw_conn = boto.ec2.cloudwatch.connect_to_region(region)
-
+        # EC2/ELB
         elb_conn = boto.ec2.elb.connect_to_region(region)
-        load_balancers = elb_conn.get_all_load_balancers()
-        for elb in load_balancers:
-            print elb.name
+        loadbalancers = elb_conn.get_all_load_balancers()
+
+        for loadbalancer in loadbalancers:
+            health_count = 0
+            few_request_count = 0
+            for instances in loadbalancer.get_instance_health():
+                # バックエンドインスタンスの確認
+                if instances.state == "InService":
+                    health_count = health_count + 1
+            # リクエスト数が少ない
+            if health_count >= 1:
+                # DatabaseConnections (Count)
+                lb_metrics = cw_conn.get_metric_statistics(
+                            86400,
+                            start_time,
+                            end_time,
+                            'RequestCount',
+                            'AWS/ELB',
+                            'Maximum',
+                            dimensions={'LoadBalancerName':loadbalancer.name})
+
+                for metric in lb_metrics:
+                    for key,val in metric.iteritems():
+                        # コネクションが発生していない
+                        if key == 'Maximum'and int(val) <= ELBREQ:
+                            few_request_count = few_request_count + 1
+
+            if health_count == 0 or few_request_count >= 1:
+                elb_name = loadbalancer.name + " (Instance Count: " \
+                         + str(health_count) + ")"
+                elb_list.append(elb_name)
+
+        return elb_list
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch.',
+        log_error('Error of the CloudWatch. - idle_elb()',
                   traceback.format_exc())
 
 #############################################################
@@ -257,18 +267,20 @@ def idle_rds(region):
 
             for metric in db_metrics:
                 for key,val in metric.iteritems():
-                    # 直近、1週間コネクションが発生していない
+                    # コネクションが発生していない
                     if key == 'Maximum'and int(val) == 0:
                         no_connect_count = no_connect_count + 1
-  
-            if no_connect_count >= idle_period:
-                rds_list.append(instance.id)
+
+            if no_connect_count >= RDSPERIOD:
+                instance_name = instance.id + " - " + instance.instance_class +\
+                    " (" + instance.engine + " " + instance.engine_version + ")"
+                rds_list.append(instance_name)
 
         return rds_list
 
     except:
         # エラー出力
-        log_error('Error of the CloudWatch.',
+        log_error('Error of the CloudWatch. - idle_rds()',
                   traceback.format_exc())
 
 #############################################################
@@ -285,24 +297,37 @@ if __name__ == '__main__':
         region = json.load(urllib2.urlopen(url))['region']
 
         # Low Utilization Amazon EC2 Instances
-        for instance_name in low_utilization_ec2(region):
-            print instance_name
+        mes_ec2 = ""
+        for ec2instance in low_utilization_ec2(region):
+            mes_ec2 = mes_ec2 + "  " + ec2instance + "\n"
 
         # Underutilized Amazon EBS Volumes
-        for ebs in underused_ebs(region):
-            print ebs
+        mes_ebs = ""
+        for ebsvolume in underused_ebs(region):
+            mes_ebs = mes_ebs + "  " + ebsvolume + "\n"
 
         # Unassociated Elastic IP Addresses
-        for ip in underused_eip(region):
-            print ip
+        mes_eip = ""
+        for ipaddress in underused_eip(region):
+            mes_eip = mes_eip + "  " + ipaddress + "\n"
 
         # Idle Load Balancers
-        for els in idle_elb(region):
-            print elb
+        mes_elb = ""
+        for loadbalancer in idle_elb(region):
+            mes_elb = mes_elb + "  " + loadbalancer + "\n"
 
         # Amazon RDS Idle DB Instances
-        for instance_name in idle_rds(region):
-            print instance_name
+        mes_rds = ""
+        for rdsinstance in idle_rds(region):
+            mes_rds = mes_rds + "  " + rdsinstance + "\n"
+
+        message = MAIL_MESSAGE.decode('utf-8')\
+                     .replace('<EC2-LowUtilization>', mes_ec2)\
+                     .replace('<EBS-Underutilized>', mes_ebs)\
+                     .replace('<EIP-Unassociated>', mes_eip)\
+                     .replace('<ELB-Idle>', mes_elb)\
+                     .replace('<RDS-Idle>', mes_rds)
+        print message
 
     except:
         # 異常終了
