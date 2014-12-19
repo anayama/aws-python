@@ -14,6 +14,7 @@ path = os.environ["PYTHONPATH"]
 DEV = os.path.join(path,'development.conf')
 config = ConfigParser.RawConfigParser()
 config.read(DEV)
+REGION = config.get('ses','region')
 FROM_MAIL = config.get('ses','from_address')
 TO_MAIL = config.get('ses','to_address')
 
@@ -27,22 +28,23 @@ try:
 
     if sts == 0:
         # リージョン取得
-#       url = 'http://169.254.169.254/latest/dynamic/instance-identity/document'
-#       region = json.load(urllib2.urlopen(url))['region']
-        region = 'us-east-1'
+        ses_region = 'us-east-1'
+        for region in boto.ses.regions():
+            if REGION in region.name:
+                ses_region = REGION
 
         # SES
-        ses_conn = boto.ses.connect_to_region(region)
+        ses_conn = boto.ses.connect_to_region(ses_region)
         addresses = ses_conn.list_verified_email_addresses()
         address = addresses["ListVerifiedEmailAddressesResponse"]\
                                 ["ListVerifiedEmailAddressesResult"]\
                                 ["VerifiedEmailAddresses"]
         if TO_MAIL in address and FROM_MAIL in address:
             print FROM_MAIL, TO_MAIL
-            ses_conn.send_email(FROM_MAIL,
-                                '[AWS]SES Send a Test Email',
-                                'Python SDK からのテストメールを送信します',
-                                TO_MAIL)
+#           ses_conn.send_email(FROM_MAIL,
+#                               '[AWS]SES Send a Test Email',
+#                               'Python SDK からのテストメールを送信します',
+#                               TO_MAIL)
 
 except:
     # 異常終了

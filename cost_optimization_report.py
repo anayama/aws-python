@@ -4,6 +4,8 @@
 import sys
 import boto.ec2.cloudwatch, boto.ec2.elb, boto.rds, boto.ses
 import urllib2, json
+import fcntl
+import ConfigParser
 import datetime
 import traceback
 
@@ -11,9 +13,13 @@ from common import *
 
 # 定義ファイルの取込み
 path = os.environ["PYTHONPATH"]
+COMMON = os.path.join(path,'common.conf')
 USER = os.path.join(path,'user.conf')
 
 config = ConfigParser.RawConfigParser()
+config.read(COMMON)
+LOCK_FILE = config.get('optimization','optimization_lock')
+
 config.read(USER)
 EC2CPU = int(config.get('optimization','ec2_cpu_utilization'))
 EC2PERIOD = int(config.get('optimization','ec2_low_period'))
@@ -24,21 +30,35 @@ RDSPERIOD = int(config.get('optimization','rds_idle_period'))
 MESSAGE_REGION = config.get('optimization','region')
 MESSAGE_FROM = config.get('optimization','from_address')
 MESSAGE_TO = config.get('optimization','to_address')
-MESSAGE_SUBJECT = "【AWS】コスト最適化のレポート通知"
+MESSAGE_SUBJECT = "【AWS】コスト最適化レポートの確認通知"
 MESSAGE_BODY = """
-【コスト最適化】
- 不要リソースやアイドル状態など、コストを節約できるリソースは下記のとおりです。
+                                                     作成：<Create-Date>
+【コスト最適化レポート】
+
+<Create-Date> 、利用頻度の低いリソースを検知したため、ご連絡します。
+統廃合、スペック見直しなどのインフラ最適化を検討して下さい。
+検討対象は以下のとおり、コスト節約が図れるかご確認のほどお願いします。
+
 
 1. 使用率の低いAmazon EC2 Instances
+
 <EC2-LowUtilization>
 2. 利用頻度の低いAmazon EBSボリューム
+
 <EBS-Underutilized>
 3. 関連付けられていない Elastic IP Address
+
 <EIP-Unassociated>
 4. アイドル状態の Load Balancer
+
 <ELB-Idle>
 5. Amazon RDSアイドル状態のDBインスタンス
+
 <RDS-Idle>
+
+--
+AWS推進
+v2020-sensin@cubesystem.co.jp
 """
 
 # EC2とNameタグの対比表
@@ -59,6 +79,30 @@ def run_check():
         return True
     else:
         return False
+
+#############################################################
+#   排他制御の開始
+#############################################################
+def do_lock():
+    try:
+        lock_file = open(LOCK_FILE, "r")
+        # 処理の排他用のファイルロック
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX|fcntl.LOCK_NB)
+        return True
+    except:
+        return False
+
+#############################################################
+#   排他制御の解除
+#############################################################
+def do_unlock():
+    try:
+        if lock_file != None:
+            # 排他制御の解除
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        if lock_file != None:
+            lock_file.close()
 
 #############################################################
 #  Amazon EC2 軽度利用インスタンス
@@ -321,50 +365,75 @@ def send_message(message):
 #############################################################
 if __name__ == '__main__':
     try:
-        # EIPの割当がない場合は終了
-        if not run_check:
-            exit(1)
+        # 排他制御の開始
+        with open(LOCK_FILE, "r") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX|fcntl.LOCK_NB)
 
-        # リージョン取得
-        url = 'http://169.254.169.254/latest/dynamic/instance-identity/document'
-        region = json.load(urllib2.urlopen(url))['region']
+            try:
+                report_flag = False
 
-        # Low Utilization Amazon EC2 Instances
-        mes_ec2 = ""
-        for ec2instance in low_utilization_ec2(region):
-            mes_ec2 = mes_ec2 + "  " + ec2instance + "\n"
+                # 開始メッセージ
+                log_info('Cost optimization report Start')
 
-        # Underutilized Amazon EBS Volumes
-        mes_ebs = ""
-        for ebsvolume in underused_ebs(region):
-            mes_ebs = mes_ebs + "  " + ebsvolume + "\n"
+                # EIPの割当がない場合は終了
+                if not run_check:
+                    exit(1)
 
-        # Unassociated Elastic IP Addresses
-        mes_eip = ""
-        for ipaddress in underused_eip(region):
-            mes_eip = mes_eip + "  " + ipaddress + "\n"
+                # リージョン取得
+                url = 'http://169.254.169.254/latest/dynamic/instance-identity/document'
+                region = json.load(urllib2.urlopen(url))['region']
 
-        # Idle Load Balancers
-        mes_elb = ""
-        for loadbalancer in idle_elb(region):
-            mes_elb = mes_elb + "  " + loadbalancer + "\n"
+                # Low Utilization Amazon EC2 Instances
+                mes_ec2 = ""
+                for ec2instance in low_utilization_ec2(region):
+                    mes_ec2 = mes_ec2 + "    " + ec2instance + "\n"
+                    report_flag = True
 
-        # Amazon RDS Idle DB Instances
-        mes_rds = ""
-        for rdsinstance in idle_rds(region):
-            mes_rds = mes_rds + "  " + rdsinstance + "\n"
+                # Underutilized Amazon EBS Volumes
+                mes_ebs = ""
+                for ebsvolume in underused_ebs(region):
+                    mes_ebs = mes_ebs + "    " + ebsvolume + "\n"
+                    report_flag = True
 
-        message = MESSAGE_BODY.decode('utf-8')\
-                     .replace('<EC2-LowUtilization>', mes_ec2)\
-                     .replace('<EBS-Underutilized>', mes_ebs)\
-                     .replace('<EIP-Unassociated>', mes_eip)\
-                     .replace('<ELB-Idle>', mes_elb)\
-                     .replace('<RDS-Idle>', mes_rds)
-        send_message(message)
+                # Unassociated Elastic IP Addresses
+                mes_eip = ""
+                for ipaddress in underused_eip(region):
+                    mes_eip = mes_eip + "    " + ipaddress + "\n"
+                    report_flag = True
 
-    except:
-        # 異常終了
-        log_info('CloudWatch abnormal termination')
-        # エラー出力
-        log_error('Error of the Cost Optimization.',traceback.format_exc())
+                # Idle Load Balancers
+                mes_elb = ""
+                for loadbalancer in idle_elb(region):
+                    mes_elb = mes_elb + "    " + loadbalancer + "\n"
+                    report_flag = True
 
+                # Amazon RDS Idle DB Instances
+                mes_rds = ""
+                for rdsinstance in idle_rds(region):
+                    mes_rds = mes_rds + "    " + rdsinstance + "\n"
+                    report_flag = True
+
+                # Send of cost optimization report
+                if report_flag:
+                    now = datetime.datetime.now()
+                    today = now.strftime("%Y/%m/%d %H:%M")
+                    message = MESSAGE_BODY.decode('utf-8')\
+                                 .replace('<Create-Date>', today)\
+                                 .replace('<EC2-LowUtilization>', mes_ec2)\
+                                 .replace('<EBS-Underutilized>', mes_ebs)\
+                                 .replace('<EIP-Unassociated>', mes_eip)\
+                                 .replace('<ELB-Idle>', mes_elb)\
+                                 .replace('<RDS-Idle>', mes_rds)
+                    send_message(message)
+
+                # 終了メッセージ
+                log_info('Cost optimization report End')
+
+            except:
+                log_info('Cost optimization report Fail')
+            finally:
+                # 排他制御の解除
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    except IOError:
+        pass

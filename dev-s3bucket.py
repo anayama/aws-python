@@ -77,8 +77,10 @@ try:
         # S3作成
         s3_conn = boto.s3.connection.S3Connection()
         if bucket_name in s3_conn:
+            print "get bucket"
             bucket = s3_conn.get_bucket(bucket_name)
         else:
+            print "create bucket"
             bucket = s3_conn.create_bucket(bucket_name,
                                location=Location.APNortheast)
         # ポリシー設定
