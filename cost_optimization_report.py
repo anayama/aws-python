@@ -32,7 +32,6 @@ MESSAGE_FROM = config.get('optimization','from_address')
 MESSAGE_TO = config.get('optimization','to_address')
 MESSAGE_SUBJECT = "【AWS】コスト最適化レポートの確認通知"
 MESSAGE_BODY = """
-                                                     作成：<Create-Date>
 【コスト最適化レポート】
 
 <Create-Date> 、利用頻度の低いリソースを検知したため、ご連絡します。
@@ -58,7 +57,6 @@ MESSAGE_BODY = """
 
 --
 AWS推進
-v2020-sensin@cubesystem.co.jp
 """
 
 # EC2とNameタグの対比表
